@@ -21,18 +21,20 @@ struct Args {
     #[arg(help="Directory for input files", value_parser=parse_dir)]
     in_dir: PathBuf,
     #[arg(help="Directory for output files", value_parser=parse_dir)]
-    out_dir: PathBuf
+    out_dir: PathBuf,
+    #[arg(short, long, help="Watch for changes to the input directory and recompile")]
+    watch: bool
 }
 
 #[derive(Debug)]
-pub struct SiteBuilder {
-    args: Args,
+pub struct SiteBuilder<'a> {
+    args: &'a Args,
     assets: HashMap<u64, (Vec<u8>, String)>,
     posts: Vec<Post>,
     env: minijinja::Environment<'static>
 }
 
-impl SiteBuilder {
+impl<'a> SiteBuilder<'a> {
     fn asset_path(hash: u64, ext: &str) -> String {
         format!("assets/{:016x}.{}", hash, ext)
     }
@@ -232,12 +234,47 @@ pub fn dt_toml_to_chrono(dt: &toml_datetime::Datetime) -> chrono::DateTime<chron
 }
 
 
-fn main() {
-    let args = Args::parse();
-
+fn recompile(args: &Args) {
     let mut builder = SiteBuilder { args, assets: HashMap::new(), posts: Vec::new(), env: minijinja::Environment::new() };
     builder.build_posts();
     builder.load_templates();
     builder.build_pages();
     builder.copy_static();
+}
+
+fn main() {
+    let args = Args::parse();
+
+    recompile(&args);
+
+    if args.watch {
+        use notify::Watcher;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Ok(mut watcher) = notify::recommended_watcher(tx)
+            .inspect_err(|e| println!("error: could not watch input directory: {e}"))
+            else { return };
+        let Ok(()) = watcher.watch(&args.in_dir, notify::RecursiveMode::Recursive)
+            .inspect_err(|e| println!("error: could not watch input directory: {e}"))
+            else { return };
+        for res in rx {
+            match res {
+                Ok(notify::Event { kind: notify::EventKind::Modify(_) | notify::EventKind::Create(_) | notify::EventKind::Remove(_), paths, .. }) => {
+                    for path in paths {
+                        if path.starts_with(&args.out_dir) { continue; }
+
+                        let Ok(path) = path.strip_prefix(&args.in_dir) else { continue };
+                        let is_hidden = path.components().flat_map(|c| c.as_os_str().to_str())
+                            .any(|c| c.starts_with('.'));
+                        if is_hidden { continue }
+
+                        println!("info: recompiling due to modification of `{}`", path.display());
+                        recompile(&args);
+                        break
+                    }
+                },
+                Ok(_) => (),
+                Err(e) => println!("error: could not watch input directory: {e}")
+            }
+        }
+    }
 }

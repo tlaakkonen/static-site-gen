@@ -22,14 +22,14 @@ pub struct PostMeta {
 }
 
 #[derive(Debug)]
-pub struct PostBuilder<'a> {
-    pub site: &'a mut SiteBuilder,
+pub struct PostBuilder<'a, 'b> {
+    pub site: &'a mut SiteBuilder<'b>,
     pub file: PathBuf,
     pub dir: Option<PathBuf>,
     pub meta: Option<PostMeta>
 }
 
-impl<'a> PostBuilder<'a> {
+impl<'a, 'b> PostBuilder<'a, 'b> {
     fn resolve_file(&self, path: &str) -> Option<PathBuf> {
         let dir = self.dir.as_ref()?;
         let dpath = dir.join(path);
@@ -184,14 +184,14 @@ const CLEANING_OPTIONS: svgcleaner::CleaningOptions = svgcleaner::CleaningOption
     join_style_attributes: svgcleaner::StyleJoinMode::Some
 };
 
-struct CodeImageProcessor<'a, 'b, I> {
+struct CodeImageProcessor<'a, 'b, 'c, I> {
     iter: I,
-    post: &'b mut PostBuilder<'a>,
+    post: &'b mut PostBuilder<'a, 'c>,
     highlighter: arborium::Highlighter,
     buffer: VecDeque<cmark::Event<'b>>
 }
 
-impl<'a, 'b, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, I> {
+impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 'c, I> {
     fn accumulate_plain_text(&mut self, tag: cmark::TagEnd, desc: &str) -> Option<String> {
         let mut text = String::new();
         loop {
@@ -283,7 +283,7 @@ impl<'a, 'b, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, I> {
     }
 }
 
-impl<'a, 'b, I: Iterator<Item=cmark::Event<'b>>> Iterator for CodeImageProcessor<'a, 'b, I> {
+impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> Iterator for CodeImageProcessor<'a, 'b, 'c, I> {
     type Item = cmark::Event<'b>;
 
     fn next(&mut self) -> Option<Self::Item> {
