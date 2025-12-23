@@ -1,0 +1,23 @@
+[package]
+name = "static-site-gen"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arborium = { version = "2.3.2", default-features = false, features = ["lang-python", "lang-rust", "lang-haskell"] }
+clap = { version = "4.5.53", default-features = false, features = ["color", "derive", "error-context", "help", "std", "usage", "wrap_help"] }
+minijinja = { version = "2.14.0", default-features = false, features = ["builtins", "macros", "multi_template", "adjacent_loop_items", "serde", "std_collections", "debug", "loader", "deserialization"] }
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+pulldown-cmark-escape = "0.11.0"
+pulldown-latex = "0.7.1"
+url = "2.5.7"
+idna_adapter = "1.0.0"
+image = { version = "0.25.9", default-features = false, features = ["bmp", "gif", "jpeg", "png", "pnm", "webp"] }
+svgcleaner = { version = "0.9.5", default-features = false }
+svgdom = "0.10.5"
+toml = { version = "0.9.10", default-features = false, features = ["parse", "serde", "std", "display"] }
+toml_datetime = "0.7.5"
+chrono = { version = "0.4.42", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+walkdir = "2.5.0"
+urlencoding = "2.1.3"
