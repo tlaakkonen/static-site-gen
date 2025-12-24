@@ -1,4 +1,6 @@
 mod post;
+#[cfg(feature = "dev")]
+mod server;
 
 use std::{collections::{HashMap, HashSet}, io::Read, path::PathBuf};
 use clap::Parser;
@@ -15,15 +17,22 @@ fn parse_dir(s: &str) -> Result<PathBuf, String> {
     }
 }
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 struct Args {
     #[arg(help="Directory for input files", value_parser=parse_dir)]
     in_dir: PathBuf,
     #[arg(help="Directory for output files", value_parser=parse_dir)]
     out_dir: PathBuf,
+    #[cfg(feature = "dev")]
     #[arg(short, long, help="Watch for changes to the input directory and recompile")]
-    watch: bool
+    watch: bool,
+    #[cfg(feature = "dev")]
+    #[arg(short, long, help="Start dev server and watch for changes")]
+    dev: bool,
+    #[cfg(feature = "dev")]
+    #[arg(short, long, help="Port to use for dev server", default_value="8080")]
+    port: u16
 }
 
 #[derive(Debug)]
@@ -247,33 +256,45 @@ fn main() {
 
     recompile(&args);
 
-    if args.watch {
-        use notify::Watcher;
-        let (tx, rx) = std::sync::mpsc::channel();
-        let Ok(mut watcher) = notify::recommended_watcher(tx)
-            .inspect_err(|e| println!("error: could not watch input directory: {e}"))
-            else { return };
-        let Ok(()) = watcher.watch(&args.in_dir, notify::RecursiveMode::Recursive)
-            .inspect_err(|e| println!("error: could not watch input directory: {e}"))
-            else { return };
-        for res in rx {
-            match res {
-                Ok(notify::Event { kind: notify::EventKind::Modify(_) | notify::EventKind::Create(_) | notify::EventKind::Remove(_), paths, .. }) => {
-                    for path in paths {
-                        if path.starts_with(&args.out_dir) { continue; }
+    #[cfg(feature = "dev")] {
+        if args.dev {
+            server::start_server(args.out_dir.clone(), args.port);
+        }
 
-                        let Ok(path) = path.strip_prefix(&args.in_dir) else { continue };
-                        let is_hidden = path.components().flat_map(|c| c.as_os_str().to_str())
-                            .any(|c| c.starts_with('.'));
-                        if is_hidden { continue }
+        if args.watch || args.dev {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let Ok(mut watcher) = notify_debouncer_full::new_debouncer(std::time::Duration::from_millis(250), None, tx)
+                .inspect_err(|e| println!("error: could not watch input directory: {e:?}")) else { return };
+            if let Err(e) = watcher.watch(&args.in_dir, notify_debouncer_full::notify::RecursiveMode::Recursive) {
+                println!("error: could not watch input directory: {e:?}");
+                return
+            }
 
-                        println!("info: recompiling due to modification of `{}`", path.display());
-                        recompile(&args);
-                        break
-                    }
-                },
-                Ok(_) => (),
-                Err(e) => println!("error: could not watch input directory: {e}")
+            for event in rx {
+                match event {
+                    Ok(events) => {
+                        'outer: for event in events {
+                            let notify_debouncer_full::DebouncedEvent { event: notify_debouncer_full::notify::Event {
+                                kind: notify_debouncer_full::notify::EventKind::Modify(_) | notify_debouncer_full::notify::EventKind::Create(_),
+                                paths, ..
+                            }, .. } = event else { continue };
+
+                            for path in paths {
+                                if path.starts_with(&args.out_dir) { continue; }
+
+                                let Ok(path) = path.strip_prefix(&args.in_dir) else { continue };
+                                let is_hidden = path.components().flat_map(|c| c.as_os_str().to_str())
+                                    .any(|c| c.starts_with('.'));
+                                if is_hidden { continue }
+
+                                println!("info: recompiling due to `{}`", path.display());
+                                recompile(&args);
+                                break 'outer
+                            }
+                        }
+                    },
+                    Err(e) => println!("error: could not watch input directory: {e:?}")
+                }
             }
         }
     }
