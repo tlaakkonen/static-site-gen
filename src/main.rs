@@ -40,7 +40,8 @@ pub struct SiteBuilder<'a> {
     args: &'a Args,
     assets: HashMap<u64, (Vec<u8>, String)>,
     posts: Vec<Post>,
-    env: minijinja::Environment<'static>
+    env: minijinja::Environment<'static>,
+    dev_mode: bool
 }
 
 impl<'a> SiteBuilder<'a> {
@@ -161,11 +162,11 @@ impl<'a> SiteBuilder<'a> {
     }
 
     fn build_pages(&self) {
-        self.build_page("index", "index.html", context! { posts => &self.posts });
+        self.build_page("index", "index.html", context! { posts => &self.posts, dev_mode => self.dev_mode });
         
         let mut tags = HashSet::new();
         for post in &self.posts {
-            self.build_page("post", &format!("posts/{}.html", post.id), context! { post => post });
+            self.build_page("post", &format!("posts/{}.html", post.id), context! { post => post, dev_mode => self.dev_mode });
 
             for tag in &post.meta.tags {
                 tags.insert(tag.clone());
@@ -173,7 +174,7 @@ impl<'a> SiteBuilder<'a> {
         }
 
         for tag in tags {
-            self.build_page("tag", &format!("tags/{}.html", tag), context! { posts => &self.posts, tag => tag });
+            self.build_page("tag", &format!("tags/{}.html", tag), context! { posts => &self.posts, tag => tag, dev_mode => self.dev_mode });
         }
 
         for (&hash, (content, ext)) in &self.assets {
@@ -244,7 +245,10 @@ pub fn dt_toml_to_chrono(dt: &toml_datetime::Datetime) -> chrono::DateTime<chron
 
 
 fn recompile(args: &Args) {
-    let mut builder = SiteBuilder { args, assets: HashMap::new(), posts: Vec::new(), env: minijinja::Environment::new() };
+    #[cfg(feature = "dev")] let dev_mode = args.dev;
+    #[cfg(not(feature = "dev"))] let dev_mode = false;
+
+    let mut builder = SiteBuilder { args, assets: HashMap::new(), posts: Vec::new(), env: minijinja::Environment::new(), dev_mode };
     builder.build_posts();
     builder.load_templates();
     builder.build_pages();
@@ -257,8 +261,10 @@ fn main() {
     recompile(&args);
 
     #[cfg(feature = "dev")] {
+        let mut mtx = None;
         if args.dev {
-            server::start_server(args.out_dir.clone(), args.port);
+            let tx = server::start_server(args.out_dir.clone(), args.port);
+            mtx = Some(tx);
         }
 
         if args.watch || args.dev {
@@ -289,6 +295,9 @@ fn main() {
 
                                 println!("info: recompiling due to `{}`", path.display());
                                 recompile(&args);
+                                if let Some(tx) = &mut mtx {
+                                    tx.send_replace(std::time::Instant::now());
+                                }
                                 break 'outer
                             }
                         }
