@@ -179,9 +179,9 @@ impl Service<Request<Incoming>> for Server {
 
 async fn server_main(dir: PathBuf, port: u16, rx: watch::Receiver<std::time::Instant>) -> Result<(), Error> {
     let server = Server { dir: Arc::new(dir), rx };
-    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("info: server: listening on 127.0.0.1:{port}");
+    println!("info: server: listening on 0.0.0.0:{port}");
     loop {
         let (stream, _) = listener.accept().await?;
         let io = hyper_util::rt::TokioIo::new(stream);
