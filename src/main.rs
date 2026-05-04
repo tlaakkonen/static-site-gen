@@ -32,7 +32,9 @@ struct Args {
     dev: bool,
     #[cfg(feature = "dev")]
     #[arg(short, long, help="Port to use for dev server", default_value="8080")]
-    port: u16
+    port: u16,
+    #[arg(short='D', long, help="Compile draft posts")]
+    draft: bool
 }
 
 #[derive(Debug)]
@@ -91,6 +93,11 @@ impl<'a> SiteBuilder<'a> {
             };
 
             if let Some(post) = builder.build() {
+                if post.meta.draft && !self.args.draft {
+                    println!("info: skipping post `{}` because drafts are disabled", post.id);
+                    continue
+                }
+
                 self.posts.push(post);
             }
         }

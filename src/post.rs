@@ -18,7 +18,10 @@ pub struct PostMeta {
     pub title: String,
     pub date: toml_datetime::Datetime,
     pub tags: Vec<String>,
-    pub ghcomment: Option<(u32, Vec<String>)>
+    pub ghcomment: Option<(u32, Vec<String>)>,
+    pub draft: bool,
+    pub tikzinc: Option<String>,
+    pub tikzscale: Option<String>
 }
 
 #[derive(Debug)]
@@ -77,7 +80,10 @@ impl<'a, 'b> PostBuilder<'a, 'b> {
             title: self.get_default_title(),
             date: self.get_default_date(),
             tags: Vec::new(),
-            ghcomment: None
+            ghcomment: None,
+            draft: false,
+            tikzinc: None,
+            tikzscale: None
         };
         println!(
             "warning: post does not have metadata, using defaults:\n    title = {:?},\n    date = {},\n    tags = {:?}\n    ghcomment = {:?}", 
@@ -104,7 +110,9 @@ impl<'a, 'b> PostBuilder<'a, 'b> {
             iter: cmark::TextMergeStream::new(parser), 
             post: &mut self,
             highlighter: arborium::Highlighter::new(), 
-            buffer: VecDeque::new() 
+            buffer: VecDeque::new(),
+            tikzinc: None,
+            tikzscale: None
         };
         let stream = MathProcessor { iter: c_im_stream, storage: latex::Storage::new() };
         let mut buffer = String::new();
@@ -127,7 +135,10 @@ struct PostMetaIncomplete {
     date: Option<toml_datetime::Datetime>,
     tags: Option<Vec<String>>,
     ghcommentid: Option<u32>,
-    ghcommentauthors: Option<Vec<String>>
+    ghcommentauthors: Option<Vec<String>>,
+    draft: Option<bool>,
+    tikzinc: Option<String>,
+    tikzscale: Option<String>
 }
 
 const WRITE_OPTIONS: svgcleaner::WriteOptions = svgcleaner::WriteOptions {
@@ -188,7 +199,9 @@ struct CodeImageProcessor<'a, 'b, 'c, I> {
     iter: I,
     post: &'b mut PostBuilder<'a, 'c>,
     highlighter: arborium::Highlighter,
-    buffer: VecDeque<cmark::Event<'b>>
+    buffer: VecDeque<cmark::Event<'b>>,
+    tikzinc: Option<String>,
+    tikzscale: Option<String>
 }
 
 impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 'c, I> {
@@ -211,6 +224,134 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
         Some(text)
     }
 
+    fn handle_tikz_image(&mut self, path: PathBuf, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
+        let mut inc_source = String::new();
+        if let Some(tikzinc) = self.tikzinc.as_ref().and_then(|t| self.post.resolve_file(t)) {
+            if let Err(e) = std::fs::File::open(&tikzinc)
+                .and_then(|mut f| f.read_to_string(&mut inc_source)) {
+                println!("error: could not read tikz include file `{}`: {}", tikzinc.display(), e);
+                return Some(event)
+            }
+        }
+
+        let mut tikz_source = String::new();
+        if let Err(e) = std::fs::File::open(&path)
+            .and_then(|mut f| f.read_to_string(&mut tikz_source)) {
+            println!("error: could not read tikz source file `{}`: {}", path.display(), e);
+            return Some(event)
+        }
+
+        const PREAMBLE: &'static str = r"
+            \documentclass[tikz]{standalone}
+            \usepackage{tikz}
+            \usepackage{graphicx}
+            \usepackage{graphbox} 
+
+            \usetikzlibrary{backgrounds}
+            \usetikzlibrary{arrows}
+            \usetikzlibrary{shapes,shapes.geometric,shapes.misc}
+            \usetikzlibrary{decorations.pathmorphing}
+            \usetikzlibrary{decorations.pathreplacing}
+            \usetikzlibrary{decorations.markings}
+
+            \tikzstyle{tikzfig}=[baseline=-0.25em,scale=1.0]
+
+            \pgfkeys{/tikz/tikzit fill/.initial=0}
+            \pgfkeys{/tikz/tikzit draw/.initial=0}
+            \pgfkeys{/tikz/tikzit shape/.initial=0}
+            \pgfkeys{/tikz/tikzit category/.initial=0}
+
+            \pgfdeclarelayer{edgelayer}
+            \pgfdeclarelayer{nodelayer}
+            \pgfsetlayers{background,edgelayer,nodelayer,main}
+            \tikzstyle{none}=[inner sep=0mm]
+            \tikzstyle{every loop}=[]
+            \tikzstyle{mark coordinate}=[inner sep=0pt,outer sep=0pt,minimum size=3pt,fill=black,circle]
+        ";
+
+        let mut tempdir = match tempfile::tempdir() {
+            Ok(tempdir) => tempdir,
+            Err(e) => {
+                println!("error: could not create temporary directory: {}", e);
+                return Some(event)
+            }
+        };
+
+        tempdir.disable_cleanup(true);
+
+        let texfile_path = tempdir.path().join("image.tex");
+        let dvifile_path = tempdir.path().join("image.dvi");
+        let mut texfile = match std::fs::File::create(&texfile_path) {
+            Ok(file) => file,
+            Err(e) => {
+                println!("error: could not create tex file: {}", e);
+                return Some(event)
+            }
+        };
+
+        use std::io::Write;
+        if let Err(e) = writeln!(&mut texfile, r"
+            {PREAMBLE}
+            {inc_source}
+            \begin{{document}}
+            {{\tikzstyle{{every picture}}=[tikzfig]{tikz_source}}}
+            \end{{document}}
+        ") {
+            println!("error: could not write to tex file: {}", e);
+            return Some(event)
+        }
+
+        let output = std::process::Command::new("pdflatex")
+            .arg("-interaction=nonstopmode")
+            .arg(format!("-output-directory={}", tempdir.path().display()))
+            .arg("-output-format=dvi")
+            .arg("-file-line-error")
+            .arg("-halt-on-error")
+            .arg(format!("{}", texfile_path.display()))
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(e) => {
+                println!("error: could not run pdflatex: {}", e);
+                return Some(event)
+            }
+        };
+        
+        if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let error = match stdout.split_once("image.tex:") {
+                Some((_, error)) => error.trim(),
+                None => &stdout
+            };
+            println!("error: pdflatex did not succeed:\n{error}");
+            return Some(event)
+        }
+        
+        let output = std::process::Command::new("dvisvgm")
+            .arg("--stdout")
+            .arg("-O")
+            .arg("-n")
+            .arg(format!("-c{}", self.tikzscale.as_ref().map(|s| s.as_str()).unwrap_or("1")))
+            .arg(format!("{}", dvifile_path.display()))
+            .output();
+        let output = match output {
+            Ok(output) => output,
+            Err(e) => {
+                println!("error: could not run dvisvgm: {}", e);
+                return Some(event)
+            }
+        };
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            println!("error: dvisvgm did not succeed:\n{}", stderr.trim());
+            return Some(event)
+        }
+
+        let source = String::from_utf8_lossy(&output.stdout).to_string();
+        self.handle_svg_source(path, source, alt, Some("tikz".to_string()))
+    }
+
     fn handle_svg_image(&mut self, path: PathBuf, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
         let mut source = String::new();
         if let Err(e) = std::fs::File::open(&path)
@@ -219,11 +360,18 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
             return Some(event)
         }
 
+        self.handle_svg_source(path, source, alt, None)
+    }
+
+    fn handle_svg_source(&mut self, path: PathBuf, source: String, alt: String, class: Option<String>) -> Option<cmark::Event<'b>> {
         let cleaned = if let Ok(mut document) = svgcleaner::cleaner::parse_data(&source, &Default::default()) {
             if let None = svgcleaner::cleaner::clean_doc(&mut document, &CLEANING_OPTIONS, &WRITE_OPTIONS)
                 .ok().and_then(|_| {
                     let mut svg = document.svg_element()?;
                     svg.set_attribute_checked(("role", "img")).ok()?;
+                    if let Some(class) = class {
+                        svg.set_attribute_checked(("class", class)).ok()?;
+                    }
                     let mut title = document.create_element(svgdom::ElementId::Title);
                     title.append(&document.create_node(svgdom::NodeType::Text, &alt));
                     svg.prepend(&title);
@@ -323,6 +471,8 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> Iterator for CodeImageProce
 
                 if path.extension().and_then(|e| e.to_str()) == Some("svg") {
                     self.handle_svg_image(path, alt, event)
+                } else if path.extension().and_then(|e| e.to_str()) == Some("tikz") {
+                    self.handle_tikz_image(path, alt, event)
                 } else {
                     self.handle_raster_image(path, alt, event)
                 }
@@ -340,8 +490,15 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> Iterator for CodeImageProce
                     title: meta_raw.title.unwrap_or_else(|| self.post.get_default_title()),
                     date: meta_raw.date.unwrap_or_else(|| self.post.get_default_date()),
                     tags: meta_raw.tags.unwrap_or(Vec::new()),
-                    ghcomment: meta_raw.ghcommentid.zip(meta_raw.ghcommentauthors)
+                    ghcomment: meta_raw.ghcommentid.zip(meta_raw.ghcommentauthors),
+                    draft: meta_raw.draft.unwrap_or(false),
+                    tikzinc: meta_raw.tikzinc,
+                    tikzscale: meta_raw.tikzscale
                 };
+
+                self.tikzinc = meta.tikzinc.clone();
+                self.tikzscale = meta.tikzscale.clone();
+                
                 println!(
                     "info: got post metadata:\n    title = {:?},\n    date = {},\n    tags = {:?}\n    ghcomment = {:?}", 
                     meta.title, meta.date, meta.tags, meta.ghcomment
