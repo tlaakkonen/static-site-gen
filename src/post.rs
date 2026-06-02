@@ -33,10 +33,16 @@ pub struct PostBuilder<'a, 'b> {
 }
 
 impl<'a, 'b> PostBuilder<'a, 'b> {
-    fn resolve_file(&self, path: &str) -> Option<PathBuf> {
+    fn resolve_file(&self, path: &str) -> Option<(PathBuf, Vec<String>)> {
+        let (path, options) = if let Some((before, after)) = path.split_once(";") {
+            (after, before.split(",").map(String::from).collect())
+        } else {
+            (path, Vec::new())
+        };
+
         let dir = self.dir.as_ref()?;
         let dpath = dir.join(path);
-        dpath.is_file().then_some(dpath)
+        Some((dpath.is_file().then_some(dpath)?, options))
     }
 
     fn get_file_name(&self) -> String {
@@ -224,9 +230,9 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
         Some(text)
     }
 
-    fn handle_tikz_image(&mut self, path: PathBuf, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
+    fn handle_tikz_image(&mut self, path: PathBuf, options: Vec<String>, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
         let mut inc_source = String::new();
-        if let Some(tikzinc) = self.tikzinc.as_ref().and_then(|t| self.post.resolve_file(t)) {
+        if let Some((tikzinc, _)) = self.tikzinc.as_ref().and_then(|t| self.post.resolve_file(t)){
             if let Err(e) = std::fs::File::open(&tikzinc)
                 .and_then(|mut f| f.read_to_string(&mut inc_source)) {
                 println!("error: could not read tikz include file `{}`: {}", tikzinc.display(), e);
@@ -349,10 +355,10 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
         }
 
         let source = String::from_utf8_lossy(&output.stdout).to_string();
-        self.handle_svg_source(path, source, alt, Some("tikz".to_string()))
+        self.handle_svg_source(path, options, source, alt, Some("tikz".to_string()))
     }
 
-    fn handle_svg_image(&mut self, path: PathBuf, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
+    fn handle_svg_image(&mut self, path: PathBuf, options: Vec<String>, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
         let mut source = String::new();
         if let Err(e) = std::fs::File::open(&path)
             .and_then(|mut f| f.read_to_string(&mut source)) {
@@ -360,10 +366,10 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
             return Some(event)
         }
 
-        self.handle_svg_source(path, source, alt, None)
+        self.handle_svg_source(path, options, source, alt, None)
     }
 
-    fn handle_svg_source(&mut self, path: PathBuf, source: String, alt: String, class: Option<String>) -> Option<cmark::Event<'b>> {
+    fn handle_svg_source(&mut self, path: PathBuf, options: Vec<String>, source: String, alt: String, class: Option<String>) -> Option<cmark::Event<'b>> {
         let cleaned = if let Ok(mut document) = svgcleaner::cleaner::parse_data(&source, &Default::default()) {
             if let None = svgcleaner::cleaner::clean_doc(&mut document, &CLEANING_OPTIONS, &WRITE_OPTIONS)
                 .ok().and_then(|_| {
@@ -403,15 +409,22 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
             source
         };
 
-        println!("info: inlined svg image `{}`", path.display());
-        self.buffer.pop_back();
-        self.buffer.push_back(cmark::Event::Html("</figcaption></figure>".into()));
-        self.buffer.push_front(cmark::Event::Html("<figcaption>".into()));
-        self.buffer.push_front(cmark::Event::Html(cleaned.into()));
+        if options.iter().any(|s| s == "nocaption") {
+            println!("info: inlined nocaption svg image `{}`", path.display());
+            self.buffer.clear();
+            self.buffer.push_back(cmark::Event::Html("</figure>".into()));
+            self.buffer.push_front(cmark::Event::Html(cleaned.into()));
+        } else {
+            println!("info: inlined svg image `{}`", path.display());
+            self.buffer.pop_back();
+            self.buffer.push_back(cmark::Event::Html("</figcaption></figure>".into()));
+            self.buffer.push_front(cmark::Event::Html("<figcaption>".into()));
+            self.buffer.push_front(cmark::Event::Html(cleaned.into()));
+        }
         Some(cmark::Event::Html("<figure>".into()))
     }
 
-    fn handle_raster_image(&mut self, path: PathBuf, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
+    fn handle_raster_image(&mut self, path: PathBuf, options: Vec<String>, alt: String, event: cmark::Event<'b>) -> Option<cmark::Event<'b>> {
         let Ok(im) = image::open(&path)
             .inspect_err(|e| println!("error: could not read image file `{}`: {}", path.display(), e))
             else { return Some(event); };
@@ -423,10 +436,16 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> CodeImageProcessor<'a, 'b, 
             else { return Some(event); };
         let url = format!("/{}", self.post.site.store_asset(buffer, "webp"));
 
-        self.buffer.pop_back();
-        self.buffer.push_back(cmark::Event::Html("</figcaption></figure>".into()));
-        self.buffer.push_front(cmark::Event::Html("<figcaption>".into()));
-        self.buffer.push_front(cmark::Event::Html(format!("<img src=\"{}\" alt=\"{}\">", url, alt).into()));
+        if options.iter().any(|s| s == "nocaption") {
+            self.buffer.clear();
+            self.buffer.push_back(cmark::Event::Html("</figure>".into()));
+            self.buffer.push_front(cmark::Event::Html(format!("<img src=\"{}\" alt=\"{}\">", url, alt).into()));
+        } else {
+            self.buffer.pop_back();
+            self.buffer.push_back(cmark::Event::Html("</figcaption></figure>".into()));
+            self.buffer.push_front(cmark::Event::Html("<figcaption>".into()));
+            self.buffer.push_front(cmark::Event::Html(format!("<img src=\"{}\" alt=\"{}\">", url, alt).into()));
+        }
         Some(cmark::Event::Html("<figure>".into()))
     }
 }
@@ -464,17 +483,17 @@ impl<'a, 'b, 'c, I: Iterator<Item=cmark::Event<'b>>> Iterator for CodeImageProce
                         println!("error: cannot parse image url `{}`: {}", dest_url, e); 
                     }) else { return Some(event) };
                 
-                let Some(path) = self.post.resolve_file(&dest_url) else {
+                let Some((path, options)) = self.post.resolve_file(&dest_url) else {
                     println!("error: could not resolve relative file `{}`", dest_url);
                     return Some(event)
                 };
 
                 if path.extension().and_then(|e| e.to_str()) == Some("svg") {
-                    self.handle_svg_image(path, alt, event)
+                    self.handle_svg_image(path, options, alt, event)
                 } else if path.extension().and_then(|e| e.to_str()) == Some("tikz") {
-                    self.handle_tikz_image(path, alt, event)
+                    self.handle_tikz_image(path, options, alt, event)
                 } else {
-                    self.handle_raster_image(path, alt, event)
+                    self.handle_raster_image(path, options, alt, event)
                 }
             },
             cmark::Event::Start(cmark::Tag::MetadataBlock(cmark::MetadataBlockKind::PlusesStyle)) => {
